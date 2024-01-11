@@ -14,5 +14,7 @@ jobs:
         run: echo Hello World!!
       - name: 2nd script
         run: |
-          echo Executing the 2nd script
-          whoami
+          echo $PWD
+          ls -lart
+          source .github/scripts/myscript.sh 
+        shell: bash
