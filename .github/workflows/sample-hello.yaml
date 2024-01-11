@@ -1,0 +1,18 @@
+name: Sample_Hello
+run-name: ${{github.actor}} committed code
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: 1st script
+        run: echo Hello World!!
+      - name: 2nd script
+        run: |
+          echo Executing the 2nd script
+          whoami
