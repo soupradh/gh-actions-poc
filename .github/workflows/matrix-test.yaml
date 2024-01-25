@@ -45,7 +45,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v4.6.0
         with:
-          images: ghcr.io/frezbo/${{ matrix.project }}
+          images: ghcr.io/soupradh/${{ matrix.project }}
           flavor: |
             latest=false
           tags: |
