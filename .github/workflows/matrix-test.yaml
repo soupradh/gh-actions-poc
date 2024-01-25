@@ -1,0 +1,76 @@
+name: Build and Publish Docker image
+on:
+  push:
+    branches:
+      - matrix-test
+  pull_request:
+  workflow_dispatch:
+jobs:
+  metadata:
+    permissions:
+      packages: write
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generate-matrix.outputs.matrix }}
+      continue: ${{ steps.generate-matrix.outputs.continue }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
+      - name: generate matrix
+        id: generate-matrix
+        run: |
+          bash generate_matrix.sh
+  docker:
+    if: needs.metadata.outputs.continue == 'yes'
+    needs: metadata
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.metadata.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2.2.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2.9.0
+      - name: Login to GHCR
+        uses: docker/login-action@v2.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v4.6.0
+        with:
+          images: ghcr.io/frezbo/${{ matrix.project }}
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,enable=true,value=${{ matrix.version }}
+          labels: |
+            org.opencontainers.image.version=${{ matrix.version }}
+      - name: build/push
+        uses: docker/bake-action@v3.1.0
+        env:
+          CONTEXT: ${{ matrix.project }}
+          DOCKERFILE: Dockerfile
+          VERSION: ${{ matrix.version }}
+          LOAD_IMAGE_IN_CI: ${{ github.event_name == 'pull_request' }}
+        with:
+          files: |
+            ./docker-bake.hcl
+            ${{ steps.meta.outputs.bake-file }}
+          targets: build
+          pull: true
+          load: ${{ github.event_name == 'pull_request' }}
+          push: ${{ github.event_name != 'pull_request' }}
+      - name: test
+        if: github.event_name == 'pull_request'
+        run: |
+          set -eu -o pipefail
+          if [[ -e ${{ matrix.project }}/test.sh ]]; then
+            bash ${{ matrix.project }}/test.sh ${{ matrix.project }} ${{ matrix.version }}
+          fi

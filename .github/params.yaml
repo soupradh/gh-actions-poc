@@ -1,0 +1,19 @@
+containers:
+  - container:
+      name: cx-app-alpine-java-base-image
+      platforms:
+        - platform:
+            name: "java 11"
+            version: "11"
+            tag_suffix: "java11"
+            base_image_tag: "3.18"
+        - platform:
+            name: "java 11 fips"
+            version: "11"
+            tag_suffix: "java11-fips"
+            base_image_tag: "3.18-fips"
+        - platform:
+            name: "java 17"
+            version: "17"
+            tag_suffix: "java17"
+            base_image_tag: "3.18"

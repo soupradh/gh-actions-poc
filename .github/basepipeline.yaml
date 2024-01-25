@@ -1,0 +1,391 @@
+version: 2.1
+orbs:
+  build-tools: cxepi/cx-build-tools@2.7.0
+  security: cxepi/security-orb@5.1.9
+  aws-ecr: circleci/aws-ecr@8.2.1
+  aws-cli: circleci/aws-cli@3.1.4
+  docker: circleci/docker@2.0.3
+parameters:
+  aws_account_id_legacy:
+    type: string
+    default: "539909726087"
+  aws_account_id_sg1:
+    type: string
+    default: "854218032960"
+  force-rebuild-all:
+    type: boolean
+    default: false
+  testing:
+    type: boolean
+    default: false
+commands:
+  initialize:
+    parameters:
+      aws_account_id:
+        type: string
+      aws_profile:
+        type: string
+      cloud9_login:
+        type: boolean
+        default: false
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Export AWS_ECR_REGISTRY_ID
+          command: |
+            echo "export AWS_ECR_REGISTRY_ID=\"<< parameters.aws_account_id >>\"" >> $BASH_ENV
+      - when:
+          condition:
+            equal: [artifact-upload, << parameters.aws_profile >>]
+          steps:
+            - aws-cli/setup
+            - aws-cli/role-arn-setup:
+                profile-name: artifact-upload
+                role-arn: arn:aws:iam::<< parameters.aws_account_id >>:role/sg1-build-role
+                source-profile: default
+            - aws-ecr/ecr-login:
+                profile-name: artifact-upload
+      - when:
+          condition:
+            not:
+              equal: [artifact-upload, << parameters.aws_profile >>]
+          steps:
+            - aws-ecr/ecr-login
+      - when:
+          condition:
+            equal: [true, << parameters.cloud9_login >>]
+          steps:
+            - cloud9_login
+  cloud9_login:
+    steps:
+      - run:
+          name: login to cisco internal docker registry
+          command: |
+            echo "${cloud9_pwd}" | docker login -u "${cloud9_user}" --password-stdin devhub-docker.cisco.com
+            echo "${DEVHUB_CLOUD_JFROG_PASSWORD}" | docker login -u "${DEVHUB_CLOUD_JFROG_USER}" --password-stdin artifactory.devhub-cloud.cisco.com
+            cp -r /home/circleci/.docker ./.docker
+      - run:
+          name: Use Cloud9 ECR login
+          command: |
+            rm -rf /home/circleci/.docker
+            mv .docker /home/circleci
+  export-docker-image-version:
+    parameters:
+      image:
+        type: string
+      tag_suffix:
+        type: string
+    steps:
+      - run:
+          name: Export DOCKER_IMAGE_VERSION and DOCKER_IMAGE_TAG
+          command: |
+            release_version=$(jq ".\"<< parameters.image >>\".\"<< parameters.tag_suffix >>\"" versions.json | sed 's/"//g' )
+
+            if [ -z "${release_version}" ]; then
+              echo "Unable to create image version!"
+              exit 1
+            else
+              echo "export DOCKER_IMAGE_VERSION=\"${release_version}\"" >> $BASH_ENV
+            fi
+
+            if [ "<< parameters.tag_suffix >>" == "default" ]; then
+              echo "export DOCKER_TAG=\"${release_version}\"" >> $BASH_ENV
+            else
+              echo "export DOCKER_TAG=\"${release_version}-<< parameters.tag_suffix >>\"" >> $BASH_ENV
+            fi
+
+            echo "export DOCKER_IMAGE_BASENAME=\"<<parameters.image>>\"" >> ${BASH_ENV}
+
+            source $BASH_ENV
+            echo "${DOCKER_IMAGE_BASENAME}" > .ENV_DOCKER_IMAGE_BASENAME
+            echo "${DOCKER_TAG}" > .ENV_DOCKER_TAG
+            echo "${DOCKER_IMAGE_VERSION}" > .ENV_DOCKER_IMAGE_VERSION
+            echo "DOCKER_IMAGE_BASENAME='${DOCKER_IMAGE_BASENAME}'"
+            echo "DOCKER_TAG='${DOCKER_TAG}'"
+            echo "DOCKER_IMAGE_VERSION='${DOCKER_IMAGE_VERSION}'"
+jobs:
+  build-image:
+    parameters:
+      image:
+        type: string
+      base_dependency_version:
+        type: string
+      base_auxiliary_dependency_version:
+        description: If there is an additional dependency, specifies the base version to use
+        type: string
+        default: ""
+      include_appd:
+        description: true if the appdynamics agent should be included in the image
+        type: string
+        default: "true"
+      base_image_tag:
+        description: The image tag for the base image in the FROM clause
+        type: string
+        default: ""
+      tag_suffix:
+        type: string
+        default: "default"
+      fips:
+        type: boolean
+        default: false
+    docker:
+      - image: cimg/python:3.10
+    environment:
+      DOCKER_BUILDKIT: 1
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - cloud9_login
+      - export-docker-image-version:
+          image: << parameters.image >>
+          tag_suffix: << parameters.tag_suffix >>
+      - run:
+          name: Init docker artifact directory
+          command: mkdir -p ./images
+      - docker/build:
+          registry: local
+          image: "<< parameters.image >>"
+          tag: build
+          docker-context: "./<< parameters.image >>"
+          path: "./<< parameters.image >>"
+          extra_build_args: "--secret id=github_token,env=GITHUB_TOKEN --no-cache --pull --build-arg BASE_DEPENDENCY_VERSION=<< parameters.base_dependency_version >> --build-arg BASE_IMAGE_TAG=<< parameters.base_image_tag >> --build-arg INCLUDE_APPD=<< parameters.include_appd >> --build-arg BASE_AUXILIARY_DEPENDENCY_VERSION=<< parameters.base_auxiliary_dependency_version >> --build-arg FIPS=<< parameters.fips >>"
+          step-name: "Building docker image for << parameters.image >>"
+      - run:
+          name: Sub directory creation  - << parameters.image >>
+          command: |
+            if [[ << parameters.image >> == *"observability"* ]]; then
+               mkdir -p ./images/observability
+            fi
+      - run:
+          name: Save docker artifact - << parameters.image >>
+          command: |
+            docker save --output ./images/<< parameters.image >>:build local/<< parameters.image>>:build
+            docker save local/<< parameters.image >>:build | gzip > ./images/.docker_image.tar.gz
+      - run:
+          name: Save image version manifests - << parameters.image >>
+          command: |
+            mkdir -p ./images/manifests/<< parameters.image >>
+            temp_container_id=$(docker create local/<<parameters.image>>:build)
+            docker cp ${temp_container_id}:/tmp/manifests ./images/manifests/<< parameters.image >> || true
+            docker rm -v ${temp_container_id}
+      - store_artifacts:
+          path: ./images/manifests
+      - persist_to_workspace:
+          root: .
+          paths:
+            - images/*
+            - ./images/.docker_image.tar.gz
+      - run:
+          name: List docker images
+          command: docker images
+  corona:
+    parameters:
+      image:
+        type: string
+      image_filename:
+        type: string
+      corona_product:
+        type: string
+        default: "cpx-cloud"
+      tag_suffix:
+        type: string
+        default: "default"
+    docker:
+      - image: cimg/python:3.9
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - export-docker-image-version:
+          image: << parameters.image >>
+          tag_suffix: << parameters.tag_suffix >>
+      - security/corona-scan:
+          corona_security_contact: "cxeng-operations-ciam-master"
+          corona_product_name: <<parameters.corona_product>>
+          csdl_id: "128100"
+          engineering_contact: "sg1.ci.maintainers"
+          image_filename: <<parameters.image_filename>>
+          no_output_timeout: "30m"
+          initialize: false
+          release_version: ""
+          release_version_file: ".ENV_DOCKER_TAG"
+          release_basename_file: ".ENV_DOCKER_IMAGE_BASENAME"
+  push-image-to-ecr:
+    parameters:
+      aws_account_id:
+        type: string
+      aws_region:
+        type: string
+        default: "us-west-2"
+      aws_profile:
+        type: string
+      prefix:
+        type: string
+        default: "cx-platform"
+      image:
+        type: string
+      tag_suffix:
+        type: string
+        default: "default"
+    docker:
+      - image: cimg/python:3.9
+    steps:
+      - initialize:
+          aws_account_id: << parameters.aws_account_id >>
+          aws_profile: << parameters.aws_profile >>
+      - export-docker-image-version:
+          image: << parameters.image >>
+          tag_suffix: << parameters.tag_suffix >>
+      - run:
+          name: Eval bash environment
+          command: source "$BASH_ENV"
+      - run:
+          name: Check repository image
+          command: |
+            source .circleci/build-helpers.sh
+            check_repository_image "<< parameters.aws_profile >>" "<< parameters.prefix >>" "<< parameters.image >>" "${DOCKER_TAG}"
+      - run:
+          name: Load docker image from workspace
+          command: |
+            docker load --input ./images/<< parameters.image >>:build
+      - run:
+          name: Tag image for upload
+          command: |
+            docker tag local/<< parameters.image>>:build << parameters.aws_account_id >>.dkr.ecr.<< parameters.aws_region >>.amazonaws.com/<< parameters.prefix >>/<< parameters.image >>:${DOCKER_TAG}
+      - run:
+          name: Pushing docker-image << parameters.image >>
+          command: |
+            docker push << parameters.aws_account_id >>.dkr.ecr.<< parameters.aws_region >>.amazonaws.com/<< parameters.prefix >>/<< parameters.image >>:"${DOCKER_TAG}"
+  verify-third-party-image:
+    parameters:
+      aws_account_id:
+        type: string
+      aws_region:
+        type: string
+        default: "us-west-2"
+      aws_profile:
+        type: string
+        default: "default"
+      prefix:
+        type: string
+        default: "third-party"
+      cloud9_login:
+        type: boolean
+        default: false
+      image:
+        type: string
+      tag:
+        type: string
+    docker:
+      - image: cimg/python:3.9
+    steps:
+      - initialize:
+          aws_account_id: << parameters.aws_account_id >>
+          aws_profile: << parameters.aws_profile >>
+          cloud9_login: << parameters.cloud9_login >>
+      - run:
+          name: Validate third-party images
+          command: |
+            source .circleci/build-helpers.sh
+            image="<< parameters.image >>"
+            tag="<< parameters.tag >>"
+            check_third_party_image "<< parameters.aws_profile >>" "<< parameters.prefix >>" "${image}" "${tag}"
+            if ecr_image_exists "<< parameters.aws_profile >>" "<< parameters.prefix >>/${image}" "${tag}"; then
+              log "Image already exists in ecr repo - skipping ${image}:${tag}"
+              exit 0
+            fi
+            ensure_repo_exists "<< parameters.aws_profile >>" "<< parameters.prefix >>/${image}"
+            check_third_party_image "<< parameters.aws_profile >>" "<< parameters.prefix >>" "${image}" "${tag}"
+      - run:
+          name: Save image as tar
+          command: |
+            mkdir -p images
+            docker save "<< parameters.image >>:<< parameters.tag >>" | gzip > images/.docker_image.tar.gz
+      - persist_to_workspace:
+          root: .
+          paths:
+            - images/
+  publish-third-party-image:
+    parameters:
+      aws_account_id:
+        type: string
+      aws_region:
+        type: string
+        default: "us-west-2"
+      aws_profile:
+        type: string
+        default: "default"
+      prefix:
+        type: string
+        default: "third-party"
+      cloud9_login:
+        type: boolean
+        default: false
+      image:
+        type: string
+      tag:
+        type: string
+    docker:
+      - image: cimg/python:3.9
+    steps:
+      - initialize:
+          aws_account_id: << parameters.aws_account_id >>
+          aws_profile: << parameters.aws_profile >>
+          cloud9_login: << parameters.cloud9_login >>
+      - build-tools/initialize-git-bot
+      - run:
+          name: publish third-party containers
+          command: |
+            source .circleci/build-helpers.sh
+            image="<< parameters.image >>"
+            tag="<< parameters.tag >>"
+            if ecr_image_exists "<< parameters.aws_profile >>" "<< parameters.prefix >>/${image}" "${tag}"; then
+              log "Image already exists in ecr repo - skipping ${image}:${tag}"
+              exit 0
+            fi
+            check_third_party_image "<< parameters.aws_profile >>" "<< parameters.prefix >>" "${image}" "${tag}"
+            docker tag $image:$tag << parameters.aws_account_id >>.dkr.ecr.<< parameters.aws_region >>.amazonaws.com/<< parameters.prefix >>/${image}:${tag}
+            docker push << parameters.aws_account_id >>.dkr.ecr.<< parameters.aws_region >>.amazonaws.com/<< parameters.prefix >>/${image}:${tag}
+            tag_name=$(echo "${image}-${tag}" | sed 's/:/-/g')
+            git tag "${tag_name}"
+            git push origin "${tag_name}"
+  increment-version:
+    parameters:
+      image:
+        type: string
+      tag_suffix:
+        type: string
+        default: "default"
+    docker:
+      - image: cimg/python:3.10
+    steps:
+      - checkout
+      - build-tools/initialize-git-bot
+      - run:
+          name: Increment version for << parameters.image >> << parameters.tag_suffix >>
+          command: |
+            source .circleci/build-helpers.sh
+            increment_version "versions.json" "<< parameters.image >>" "<< parameters.tag_suffix >>"
+  wiz-scan:
+    parameters:
+      image_filename:
+        type: string
+    docker:
+      - image: cimg/python:3.10
+    steps:
+      - security/wiz-scan:
+          image_filename: << parameters.image_filename >>
+workflows:
+  build-cx-app-alpine-java-base-image-java11:
+    jobs: []
+  build-cx-app-alpine-java-base-image-java11-fips:
+    jobs: []
+  build-cx-app-alpine-java-base-image-java17:
+    jobs: []
