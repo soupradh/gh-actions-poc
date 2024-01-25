@@ -17,7 +17,7 @@ COPY --from=base /vaultwarden/ /vaultwarden
 # add ca certificates from base image
 COPY --from=base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
-EXPOSE 8080
+EXPOSE 8090
 
 # run as non-root user 1000
 USER 1001
