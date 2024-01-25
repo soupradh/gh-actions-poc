@@ -9,5 +9,5 @@ ARG TARGETARCH
 
 WORKDIR /app
 COPY --from=monito-rss /app .
-USER 1001
+USER 1000
 CMD ["server.js"]

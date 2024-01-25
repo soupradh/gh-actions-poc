@@ -2,7 +2,7 @@
 
 set -eu -o pipefail
 
-CHANGED_DIRS=$(git diff-tree --no-commit-id --name-only -r "${GITHUB_SHA}" '*Dockerfile' '*go.mod' | xargs -I {} dirname {} | uniq)
+CHANGED_DIRS=$(git diff-tree --no-commit-id --name-only -r "${GITHUB_SHA}" '*Dockerfile' | xargs -I {} dirname {} | uniq)
 
 # for pull requests we have to compare with main branch
 if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
