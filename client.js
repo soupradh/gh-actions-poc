@@ -4,7 +4,7 @@ const redis = require("redis");
 // If REDIS_HOST is not set, the default host is localhost
 // If REDIS_PORT is not set, the default port is 6379
 const redisClient = redis.createClient({
-  url: `redis://:{process.env.REDIS_PASSWD}@${process.env.REDIS_HOST}:${process.env.REDIS_PORT}`
+  url: `redis://:dummy-password@${process.env.REDIS_HOST}:${process.env.REDIS_PORT}`
 });
 
 redisClient.on("error", (err) => console.log("Error", err));
